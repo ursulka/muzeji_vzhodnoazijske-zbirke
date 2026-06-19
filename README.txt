@@ -1,4 +1,4 @@
-Slovenian museums Mapbox starter
+Slovenian museums (Vzhodnoazijske zbirke) Mapbox starter
 =================================
 
 Files needed
