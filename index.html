@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Slovenian museums map</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.18.1/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.18.1/mapbox-gl.js"></script>
+  <script src="./config.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap&subset=latin-ext" rel="stylesheet">
+
+  <!-- CSV parser. This lets the map read museums.csv directly. -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.5.3/papaparse.min.js"></script>
+
+  <style>
+    :root {
+      --panel-bg: #ffffff;
+      --panel-border: #d9d9d9;
+      --text-main: #16324f;
+      --text-soft: #506275;
+      --accent: #0b6efd;
+      --marker: #17407d;
+    }
+
+    body {
+      margin: 0;
+      font-family: 'Roboto', Arial, Helvetica, sans-serif;
+      color: var(--text-main);
+    }
+
+    #map {
+      position: absolute;
+      inset: 0;
+    }
+
+    .panel {
+      position: absolute;
+      z-index: 1;
+      top: 16px;
+      left: 16px;
+      width: min(330px, calc(100vw - 32px));
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+      padding: 14px;
+      box-sizing: border-box;
+    }
+
+    .panel h1 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      line-height: 1.25;
+    }
+
+    .panel label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-soft);
+    }
+
+    .panel select,
+    .panel input {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--panel-border);
+      border-radius: 7px;
+      padding: 8px 9px;
+      font-size: 13px;
+      background: #fff;
+      color: var(--text-main);
+    }
+
+    .field {
+      margin-top: 10px;
+    }
+
+    .status {
+      margin-top: 9px;
+      font-size: 12px;
+      color: var(--text-soft);
+      line-height: 1.35;
+    }
+
+    .mapboxgl-popup-content {
+      padding: 0;
+      border-radius: 9px;
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+
+    .popup {
+      width: min(420px, 82vw);
+      padding: 15px 16px 13px;
+      box-sizing: border-box;
+    }
+
+    .popup h2 {
+      margin: 0 22px 5px 0;
+      font-size: 19px;
+      line-height: 1.25;
+    }
+
+    .popup .place {
+      margin: 0 0 10px;
+      font-size: 13px;
+      color: var(--text-soft);
+    }
+
+    .record {
+      border-top: 1px solid #e6e6e6;
+      padding-top: 8px;
+      margin-top: 8px;
+    }
+
+    .record:first-of-type {
+      border-top: none;
+      padding-top: 0;
+      margin-top: 0;
+    }
+
+    .record summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 14px;
+      margin-bottom: 7px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 8px;
+      margin: 5px 0;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .row .key {
+      font-weight: 700;
+      color: var(--text-soft);
+    }
+
+    .row .value {
+      overflow-wrap: anywhere;
+    }
+
+    .row a {
+      color: var(--accent);
+    }
+
+    @media (max-width: 640px) {
+      .panel {
+        top: 10px;
+        left: 10px;
+        width: calc(100vw - 20px);
+      }
+
+      .row {
+        grid-template-columns: 1fr;
+        gap: 2px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <aside class="panel">
+    <h1>Vzhodnoazijski predmeti in zbirke v Sloveniji</h1>
+
+    <div class="field">
+      <label for="museum-search">Išči muzeje / zbirke</label>
+      <input id="museum-search" type="search" placeholder="Vnesite muzej, mesto, zbirko ...">
+    </div>
+
+    <div class="field">
+      <label for="museum-select">Izberi muzej</label>
+      <select id="museum-select">
+        <option value="">Vsi muzeji</option>
+      </select>
+    </div>
+
+    <div id="status" class="status">Loading CSV...</div>
+  </aside>
+
+  <script>
+
+    mapboxgl.accessToken = MAPBOX_TOKEN;
+
+    const CSV_URL = "./data/museums.csv";
+
+    const FIELD_CANDIDATES = {
+      name: [
+        "MUZEJ / USTANOVA", "Ime muzeja", "Naziv muzeja", "Institucija", "Ustanova",
+        "Name", "Museum", "Institution"
+      ],
+      collection: [
+        "ZBIRKA"
+      ],
+      link: [
+        "POVEZAVA"
+      ],
+      city: [
+        "Kraj", "Mesto", "Naselje", "Občina", "Obcina", "City", "Municipality"
+      ],
+      address: [
+        "NASLOV"
+      ],
+      latitude: [
+        "Latitude", "Lat", "lat", "LAT", "Y", "y",
+        "Zemljepisna širina", "Geografska širina", "Sirina", "Širina"
+      ],
+      longitude: [
+        "Longitude", "Lon", "Lng", "long", "lon", "lng", "LON", "X", "x",
+        "Zemljepisna dolžina", "Geografska dolžina", "Dolgina", "Dolžina"
+      ],
+      website: [
+        "SPLETNA STRAN"
+      ]
+    };
+
+    /*
+      These fields are shown inside each popup record if they exist in your CSV.
+      You can edit this list to match your table.
+      If none of these are found, the popup will show all non-empty fields except coordinates.
+    */
+    const POPUP_FIELDS = [
+      "MUZEJ / USTANOVA",
+      "ZBIRKA",
+      "POVEZAVA",
+      "REGIJA",
+      "VRSTE PREDMETOV",
+      "OBDOBJE / DATACIJA",
+      "SPLETNA STRAN"
+    ];
+
+    const map = new mapboxgl.Map({
+      container: "map",
+      style: "mapbox://styles/mapbox/light-v11",
+      center: [14.9955, 46.1512],
+      zoom: 7
+    });
+
+    map.addControl(new mapboxgl.NavigationControl(), "bottom-right");
+
+    const statusEl = document.getElementById("status");
+    const selectEl = document.getElementById("museum-select");
+    const searchEl = document.getElementById("museum-search");
+
+    let groups = [];
+    let allRows = [];
+    let headers = [];
+
+    function cleanHeader(header) {
+      return String(header || "").replace(/^\uFEFF/, "").trim();
+    }
+
+    function cleanRow(row) {
+      const out = {};
+      Object.entries(row || {}).forEach(([k, v]) => {
+        out[cleanHeader(k)] = v;
+      });
+      return out;
+    }
+
+    function findHeader(candidates) {
+      const lowerHeaders = headers.map(h => h.toLowerCase());
+      for (const candidate of candidates) {
+        const i = lowerHeaders.indexOf(String(candidate).toLowerCase());
+        if (i !== -1) return headers[i];
+      }
+      return "";
+    }
+
+    function val(row, fieldName) {
+      if (!fieldName) return "";
+      return String(row[fieldName] ?? "").trim();
+    }
+
+    function firstAvailable(row, fieldList) {
+      for (const field of fieldList) {
+        const value = val(row, field);
+        if (value) return value;
+      }
+      return "";
+    }
+
+    function toNumber(value) {
+      if (value === null || value === undefined) return NaN;
+      const cleaned = String(value)
+        .trim()
+        .replace(/\s/g, "")
+        .replace(",", ".");
+      if (cleaned === "") return NaN;
+      return Number(cleaned);
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function normaliseUrl(value) {
+      const text = String(value || "").trim();
+      if (!text) return "";
+      if (/^https?:\/\//i.test(text)) return text;
+      if (/^www\./i.test(text)) return "https://" + text;
+      return "";
+    }
+
+    function formatValue(value) {
+      const text = String(value || "").trim();
+      const url = normaliseUrl(text);
+      if (url) {
+        return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`;
+      }
+      return escapeHtml(text);
+    }
+
+    function getPopupRows(row, fieldMap) {
+      const coordinateFields = new Set([fieldMap.latitude, fieldMap.longitude].filter(Boolean));
+      const used = new Set([
+        fieldMap.name,
+        fieldMap.city,
+        fieldMap.address,
+        fieldMap.collection,
+        ...coordinateFields
+      ].filter(Boolean));
+
+      const selectedRows = POPUP_FIELDS
+        .filter(field => row[field] !== undefined && String(row[field]).trim() !== "")
+        .map(field => [field, String(row[field]).trim()]);
+
+      if (selectedRows.length > 0) {
+        return selectedRows.filter(([field]) => !coordinateFields.has(field));
+      }
+
+      return Object.entries(row)
+        .filter(([field, value]) =>
+          !used.has(field) &&
+          !coordinateFields.has(field) &&
+          value !== null &&
+          value !== undefined &&
+          String(value).trim() !== ""
+        )
+        .map(([field, value]) => [field, String(value).trim()]);
+    }
+
+    function buildPopupHtml(group, fieldMap) {
+      const placeParts = [group.city, group.address].filter(Boolean);
+      const place = placeParts.length ? `<p class="place">${escapeHtml(placeParts.join(", "))}</p>` : "";
+
+      const recordsHtml = group.items.map((row, index) => {
+        const collectionTitle =
+          val(row, fieldMap.collection) ||
+          firstAvailable(row, POPUP_FIELDS) ||
+          `Record ${index + 1}`;
+
+        const rows = getPopupRows(row, fieldMap)
+          .map(([key, value]) => `
+            <div class="row">
+              <div class="key">${escapeHtml(key)}</div>
+              <div class="value">${formatValue(value)}</div>
+            </div>
+          `)
+          .join("");
+
+        const openAttr = group.items.length === 1 || index === 0 ? " open" : "";
+
+        return `
+          <details class="record"${openAttr}>
+            <summary>${escapeHtml(collectionTitle)}</summary>
+            ${rows || "<div class='row'><div class='value'>No additional data in this row.</div></div>"}
+          </details>
+        `;
+      }).join("");
+
+      return `
+        <div class="popup">
+          <h2>${escapeHtml(group.name)}</h2>
+          ${place}
+          ${recordsHtml}
+        </div>
+      `;
+    }
+
+    function groupRows(rows, fieldMap) {
+      const mapByMuseum = new Map();
+
+      rows.forEach(row => {
+        const lat = toNumber(row[fieldMap.latitude]);
+        const lon = toNumber(row[fieldMap.longitude]);
+
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+
+        const name = val(row, fieldMap.name) || "Unnamed museum";
+        const city = val(row, fieldMap.city);
+        const address = val(row, fieldMap.address);
+
+        const key = `${name.toLowerCase()}|${lon.toFixed(6)}|${lat.toFixed(6)}`;
+
+        if (!mapByMuseum.has(key)) {
+          mapByMuseum.set(key, {
+            id: String(mapByMuseum.size),
+            name,
+            city,
+            address,
+            lon,
+            lat,
+            items: []
+          });
+        }
+
+        mapByMuseum.get(key).items.push(row);
+      });
+
+      return Array.from(mapByMuseum.values())
+        .sort((a, b) => a.name.localeCompare(b.name, "sl"));
+    }
+
+    function buildGeojson(filteredGroups) {
+      return {
+        type: "FeatureCollection",
+        features: filteredGroups.map(group => ({
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [group.lon, group.lat]
+          },
+          properties: {
+            groupId: group.id,
+            name: group.name,
+            count: group.items.length
+          }
+        }))
+      };
+    }
+
+    function fitToGroups(filteredGroups) {
+      if (!filteredGroups.length) return;
+
+      const bounds = new mapboxgl.LngLatBounds();
+      filteredGroups.forEach(group => bounds.extend([group.lon, group.lat]));
+
+      map.fitBounds(bounds, {
+        padding: 80,
+        maxZoom: filteredGroups.length === 1 ? 14 : 9
+      });
+    }
+
+    function populateSelect(filteredGroups) {
+      const currentValue = selectEl.value;
+      selectEl.innerHTML = `<option value="">Vsi muzeji</option>`;
+
+      filteredGroups.forEach(group => {
+        const option = document.createElement("option");
+        option.value = group.id;
+        option.textContent = `${group.name}${group.city ? " — " + group.city : ""} (${group.items.length})`;
+        selectEl.appendChild(option);
+      });
+
+      if ([...selectEl.options].some(opt => opt.value === currentValue)) {
+        selectEl.value = currentValue;
+      }
+    }
+
+    function filterGroups() {
+      const q = searchEl.value.trim().toLowerCase();
+      if (!q) return groups;
+
+      return groups.filter(group => {
+        const text = [
+          group.name,
+          group.city,
+          group.address,
+          ...group.items.flatMap(row => Object.values(row))
+        ].join(" ").toLowerCase();
+
+        return text.includes(q);
+      });
+    }
+
+    function updateMap() {
+      const filtered = filterGroups();
+
+      const source = map.getSource("museums");
+      if (source) source.setData(buildGeojson(filtered));
+
+      populateSelect(filtered);
+      statusEl.textContent = `${filtered.length} museums shown, ${groups.length} total.`;
+
+      if (filtered.length) fitToGroups(filtered);
+    }
+
+    function openGroup(groupId, fieldMap) {
+      const group = groups.find(g => g.id === String(groupId));
+      if (!group) return;
+
+      new mapboxgl.Popup({ maxWidth: "460px", offset: 12 })
+        .setLngLat([group.lon, group.lat])
+        .setHTML(buildPopupHtml(group, fieldMap))
+        .addTo(map);
+
+      map.flyTo({
+        center: [group.lon, group.lat],
+        zoom: Math.max(map.getZoom(), 12),
+        speed: 0.8
+      });
+    }
+
+    function loadCsvAndMap() {
+      Papa.parse(CSV_URL, {
+        download: true,
+        header: false,
+        skipEmptyLines: true,
+        complete: (results) => {
+          const rawRows = results.data;
+
+          const headerCandidates = new Set([
+            ...FIELD_CANDIDATES.name,
+            ...FIELD_CANDIDATES.collection,
+            ...FIELD_CANDIDATES.city,
+            ...FIELD_CANDIDATES.address,
+            ...FIELD_CANDIDATES.latitude,
+            ...FIELD_CANDIDATES.longitude,
+            ...FIELD_CANDIDATES.website
+          ].map(v => String(v).toLowerCase()));
+
+          const headerRowIndex = rawRows.findIndex(row => {
+            if (!Array.isArray(row)) return false;
+            const normalized = row.map(cell => String(cell || "").trim().toLowerCase());
+            const found = normalized.filter(cell => headerCandidates.has(cell)).length;
+            return found >= 2;
+          });
+
+          if (headerRowIndex === -1) {
+            statusEl.textContent = "CSV header row could not be found. Remove extra rows above the header.";
+            console.error("CSV raw rows:", rawRows.slice(0, 10));
+            return;
+          }
+
+          const headerRow = rawRows[headerRowIndex].map(cleanHeader);
+          headers = headerRow;
+          const dataRows = rawRows.slice(headerRowIndex + 1);
+
+          allRows = dataRows.map(row => {
+            const obj = {};
+            headerRow.forEach((header, index) => {
+              obj[header] = row && row[index] !== undefined ? row[index] : "";
+            });
+            return cleanRow(obj);
+          });
+
+          const fieldMap = {
+            name: findHeader(FIELD_CANDIDATES.name),
+            collection: findHeader(FIELD_CANDIDATES.collection),
+            city: findHeader(FIELD_CANDIDATES.city),
+            address: findHeader(FIELD_CANDIDATES.address),
+            latitude: findHeader(FIELD_CANDIDATES.latitude),
+            longitude: findHeader(FIELD_CANDIDATES.longitude),
+            website: findHeader(FIELD_CANDIDATES.website)
+          };
+
+          if (!fieldMap.latitude || !fieldMap.longitude) {
+            statusEl.textContent = "Latitude/longitude columns were not found. Edit FIELD_CANDIDATES or add coordinate columns.";
+            console.error("CSV headers found:", headers);
+            return;
+          }
+
+          groups = groupRows(allRows, fieldMap);
+
+          if (!groups.length) {
+            statusEl.textContent = "No valid coordinates found in the CSV.";
+            return;
+          }
+
+          map.addSource("museums", {
+            type: "geojson",
+            data: buildGeojson(groups)
+          });
+
+          map.addLayer({
+            id: "museum-points",
+            type: "circle",
+            source: "museums",
+            paint: {
+              "circle-radius": [
+                "interpolate",
+                ["linear"],
+                ["get", "count"],
+                1, 7,
+                5, 10,
+                20, 15
+              ],
+              "circle-color": "#17407d",
+              "circle-opacity": 0.86,
+              "circle-stroke-width": 1.5,
+              "circle-stroke-color": "#ffffff"
+            }
+          });
+
+          map.addLayer({
+            id: "museum-labels",
+            type: "symbol",
+            source: "museums",
+            minzoom: 9,
+            layout: {
+              "text-field": ["get", "name"],
+              "text-size": 12,
+              "text-offset": [0, 1.2],
+              "text-anchor": "top",
+              "text-allow-overlap": false
+            },
+            paint: {
+              "text-color": "#16324f",
+              "text-halo-color": "#ffffff",
+              "text-halo-width": 1
+            }
+          });
+
+          map.on("click", "museum-points", (e) => {
+            const groupId = e.features[0].properties.groupId;
+            openGroup(groupId, fieldMap);
+          });
+
+          map.on("mouseenter", "museum-points", () => {
+            map.getCanvas().style.cursor = "pointer";
+          });
+
+          map.on("mouseleave", "museum-points", () => {
+            map.getCanvas().style.cursor = "";
+          });
+
+          searchEl.addEventListener("input", updateMap);
+
+          selectEl.addEventListener("change", () => {
+            if (!selectEl.value) {
+              updateMap();
+              return;
+            }
+            openGroup(selectEl.value, fieldMap);
+          });
+
+          populateSelect(groups);
+          statusEl.textContent = `${groups.length} muzejev z Vzhodnoazijskimi zbirkami.`;
+          fitToGroups(groups);
+        },
+        error: (error) => {
+          statusEl.textContent = "CSV could not be loaded. Check the file path and run the page through a local server.";
+          console.error(error);
+        }
+      });
+    }
+
+    map.on("load", loadCsvAndMap);
+  </script>
+</body>
+</html>
